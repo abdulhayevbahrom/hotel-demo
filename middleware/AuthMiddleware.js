@@ -17,7 +17,9 @@ const authMiddleware = async (req, res, next) => {
     if (!result) return response.unauthorized(res, "Token yaroqsiz");
 
     const employee = await Employee.findById(result.id)
-      .select("isActive canLogin tokenVersion login position sections firstname lastname")
+      .select(
+        "isActive canLogin tokenVersion login position sections firstname lastname",
+      )
       .lean();
     if (!employee || !employee.isActive || !employee.canLogin) {
       return response.unauthorized(res, "Session bekor qilingan");
@@ -29,7 +31,9 @@ const authMiddleware = async (req, res, next) => {
 
     result = {
       id: employee._id,
-      role: String(employee.position || "").toLowerCase().trim(),
+      role: String(employee.position || "")
+        .toLowerCase()
+        .trim(),
       login: employee.login,
       sections: employee.sections || [],
       firstname: employee.firstname,
