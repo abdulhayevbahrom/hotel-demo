@@ -741,6 +741,41 @@ const getGuests = async (req, res) => {
   }
 };
 
+// Shaxmatka uchun alohida, faqat o'qish endpointi. U mavjud mijoz/bron
+// oqimlariga ta'sir qilmaydi va tanlangan davr bilan kesishgan yozuvlarni qaytaradi.
+const getOccupancy = async (req, res) => {
+  try {
+    const from = new Date(req.query.from);
+    const to = new Date(req.query.to);
+
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+      return response.error(res, "Boshlanish va tugash sanasi noto'g'ri");
+    }
+
+    from.setHours(0, 0, 0, 0);
+    to.setHours(0, 0, 0, 0);
+    if (to <= from) {
+      return response.error(res, "Tugash sanasi boshlanish sanasidan keyin bo'lishi kerak");
+    }
+
+    const guests = await Guest.find({
+      status: { $in: ["active", "booked"] },
+      checkInAt: { $lt: to },
+      checkoutDueAt: { $gt: from },
+    })
+      .select(
+        "firstname lastname room status checkInAt bookedForAt checkoutDueAt stayDays note",
+      )
+      .populate("room", "roomNumber floor category")
+      .sort({ checkInAt: 1 })
+      .lean();
+
+    return response.success(res, "Xonalar bandligi", guests);
+  } catch (error) {
+    return response.serverError(res, error.message);
+  }
+};
+
 const getGuestById = async (req, res) => {
   try {
     const guest = await Guest.findById(req.params.id).populate("room");
@@ -1259,6 +1294,7 @@ module.exports = {
   createGuest,
   createGuestsBulk,
   getGuests,
+  getOccupancy,
   getGuestById,
   getGuestByPassport,
   getVipRequests,

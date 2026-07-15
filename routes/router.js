@@ -76,6 +76,7 @@ const {
   createGuest,
   createGuestsBulk,
   getGuests,
+  getOccupancy,
   getGuestById,
   getGuestByPassport,
   getVipRequests,
@@ -197,6 +198,7 @@ router.delete(
 router.post("/guest", validate(createGuestSchema), createGuest);
 router.post("/guests/bulk", validate(createGuestsBulkSchema), createGuestsBulk);
 router.get("/guests", getGuests);
+router.get("/occupancy", getOccupancy);
 router.get("/vip-requests/count", getVipRequestsCount);
 router.get("/vip-requests", getVipRequests);
 router.post(
