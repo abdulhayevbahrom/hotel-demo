@@ -4,9 +4,11 @@ const mongoose = require("mongoose");
 const applyTimezone = require("../model/mongoose-timezone");
 const Guest = require("../model/Guest");
 const Room = require("../model/Room");
+const Employee = require("../model/Employee");
 const Service = require("../model/Service");
 const Expense = require("../model/Expense");
 const HallBooking = require("../model/HallBooking");
+const VipRequest = require("../model/VipRequest");
 const { getHotelSettings, applyTimeToDate } = require("../utils/hotelSettings");
 
 mongoose.plugin(applyTimezone);
@@ -14,6 +16,8 @@ mongoose.plugin(applyTimezone);
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TEST_NOTE = "Demo ma'lumot";
 const DEMO_PASSPORT_PREFIX = "DEMO-PLAZA-";
+const DEMO_ROOM_PREFIX = "D-";
+const DEMO_EMPLOYEE_PREFIX = "Demo ";
 const SERVICE_PREFIX = "Demo xizmat - ";
 const EXPENSE_PREFIX = "Demo xarajat - ";
 const HALL_EVENT_PREFIX = "Demo tadbir - ";
@@ -28,6 +32,14 @@ const makeDate = (dayOffset, hour = 10, minute = 0) => {
 const makeBirthDate = (year, month, day) => {
   const d = new Date(year, month - 1, day);
   d.setHours(0, 0, 0, 0);
+  return d;
+};
+
+const makeCurrentMonthDate = (dayIndex, hour = 10, minute = 0) => {
+  const now = new Date();
+  const d = new Date(now.getFullYear(), now.getMonth(), 1);
+  d.setDate(Math.min(dayIndex + 1, now.getDate()));
+  d.setHours(hour, minute, 0, 0);
   return d;
 };
 
@@ -91,6 +103,69 @@ const getDailyRate = (room, guestType) =>
     ? Number(room.prices?.chetEllik || 0)
     : Number(room.prices?.oddiy || 0);
 
+const ensureDemoEmployees = async () => {
+  await Employee.deleteMany({ firstname: { $regex: `^${DEMO_EMPLOYEE_PREFIX}` } });
+
+  const firstnames = [
+    "Akmal",
+    "Madina",
+    "Sardor",
+    "Nilufar",
+    "Javohir",
+    "Shahnoza",
+    "Oybek",
+    "Zarina",
+    "Doston",
+    "Mohira",
+  ];
+  const positions = [
+    "Administrator",
+    "Resepshn",
+    "Menejer",
+    "Buxgalter",
+    "Xona xizmati",
+    "Oshpaz",
+    "Texnik",
+    "Qo'riqchi",
+    "Farrosh",
+    "Ofitsiant",
+  ];
+
+  await Employee.insertMany(
+    firstnames.map((firstname, index) => ({
+      firstname: `${DEMO_EMPLOYEE_PREFIX}${firstname}`,
+      lastname: `Xodimov ${String(index + 1).padStart(2, "0")}`,
+      position: positions[index],
+      salary: 2800000 + index * 350000,
+      canLogin: false,
+      sections: [],
+      isActive: index !== 8,
+    })),
+    { ordered: false },
+  );
+};
+
+const ensureDemoRooms = async () => {
+  await Room.deleteMany({ roomNumber: { $regex: `^${DEMO_ROOM_PREFIX}` } });
+
+  const categories = ["standart", "polulyuks", "lyuks", "apartament", "bir_kishilik"];
+  const docs = Array.from({ length: 10 }, (_, index) => ({
+    roomNumber: `${DEMO_ROOM_PREFIX}${101 + index}`,
+    floor: Math.floor(index / 4) + 1,
+    capacity: (index % 3) + 1,
+    category: categories[index % categories.length],
+    status: "bosh",
+    activeGuestsCount: 0,
+    prices: {
+      oddiy: 300000 + index * 50000,
+      chetEllik: 450000 + index * 65000,
+    },
+    description: `${TEST_NOTE}: ${index + 1}-xona`,
+  }));
+
+  return Room.insertMany(docs, { ordered: false });
+};
+
 const ensureDemoServices = async () => {
   await Service.deleteMany({ name: { $regex: `^${SERVICE_PREFIX}` } });
 
@@ -100,6 +175,11 @@ const ensureDemoServices = async () => {
     ["Kir yuvish", 35000],
     ["Aeroport transfer", 220000],
     ["Kechki ovqat", 95000],
+    ["Tushlik", 75000],
+    ["Mini-bar", 60000],
+    ["Fitness", 80000],
+    ["Ekskursiya", 250000],
+    ["Xonaga taom", 55000],
   ].map(([name, defaultPrice]) => ({
     name: `${SERVICE_PREFIX}${name}`,
     defaultPrice,
@@ -112,104 +192,54 @@ const ensureDemoServices = async () => {
 };
 
 const seedGuests = async (rooms, settings, demoServices) => {
-  await Guest.deleteMany({});
+  const oldDemoGuests = await Guest.find({
+    passport: { $regex: `^${DEMO_PASSPORT_PREFIX}` },
+  }).select("_id");
+  await VipRequest.deleteMany({ guest: { $in: oldDemoGuests.map((guest) => guest._id) } });
+  await Guest.deleteMany({ passport: { $regex: `^${DEMO_PASSPORT_PREFIX}` } });
   const now = new Date();
-
-  const [r1, r2, r3] = [rooms[0], rooms[1] || rooms[0], rooms[2] || rooms[0]];
-  const serviceA = demoServices[0];
-  const serviceB = demoServices[1] || demoServices[0];
-
-  const templates = [
-    {
-      firstname: "Aziz",
-      lastname: "Karimov",
-      passport: `${DEMO_PASSPORT_PREFIX}001`,
-      guestType: "uzb",
-      phone: "+998901234001",
-      birthDate: makeBirthDate(1992, 2, 12),
-      room: r1,
-      stayDays: 2,
-      status: "active",
-      checkInAt: makeDate(-1, 11, 0),
-      paidPart: 0.6,
-      services: [{ service: serviceA, qty: 1 }],
-      vip: false,
-      note: "Demo faol mehmon",
-    },
-    {
-      firstname: "Malika",
-      lastname: "Saidova",
-      passport: `${DEMO_PASSPORT_PREFIX}002`,
-      guestType: "chetellik",
-      phone: "+447700900002",
-      birthDate: makeBirthDate(1989, 7, 3),
-      room: r2,
-      stayDays: 3,
-      status: "active",
-      checkInAt: makeDate(-4, 10, 20),
-      paidPart: 0.25,
-      services: [{ service: serviceB, qty: 1 }],
-      vip: true,
-      note: "Demo qarzdor faol mehmon",
-    },
-    {
-      firstname: "Jasur",
-      lastname: "Rasulov",
-      passport: `${DEMO_PASSPORT_PREFIX}003`,
-      guestType: "uzb",
-      phone: "+998901234003",
-      birthDate: makeBirthDate(1996, 11, 19),
-      room: r3,
-      stayDays: 1,
-      status: "booked",
-      checkInAt: makeDate(1, 12, 0),
-      paidPart: 0,
-      services: [],
-      vip: false,
-      note: "Demo bron",
-    },
-    {
-      firstname: "Dilnoza",
-      lastname: "Abdullayeva",
-      passport: `${DEMO_PASSPORT_PREFIX}004`,
-      guestType: "uzb",
-      phone: "+998901234004",
-      birthDate: makeBirthDate(1994, 5, 27),
-      room: r1,
-      stayDays: 2,
-      status: "checked_out",
-      checkInAt: makeDate(-8, 9, 30),
-      checkOutAt: makeDate(-6, 13, 0),
-      paidPart: 1,
-      services: [],
-      vip: false,
-      note: "Demo chiqib ketgan",
-    },
-    {
-      firstname: "Bekzod",
-      lastname: "Xolmatov",
-      passport: `${DEMO_PASSPORT_PREFIX}005`,
-      guestType: "chetellik",
-      phone: "+905551230005",
-      birthDate: makeBirthDate(1988, 1, 9),
-      room: r2,
-      stayDays: 4,
-      status: "checked_out",
-      checkInAt: makeDate(-16, 8, 0),
-      checkOutAt: makeDate(-12, 14, 0),
-      paidPart: 0.5,
-      services: [{ service: serviceA, qty: 2 }],
-      vip: false,
-      note: "Demo qarzdor tarix",
-    },
+  const firstnames = [
+    "Aziz", "Malika", "Jasur", "Dilnoza", "Bekzod",
+    "Nodira", "Sardor", "Zarina", "Oybek", "Mohira",
+    "Umid", "Shahnoza", "Doston", "Madina", "Akmal",
+    "Nilufar", "Javohir", "Feruza", "Kamol", "Lola",
   ];
+  const lastnames = [
+    "Karimov", "Saidova", "Rasulov", "Abdullayeva", "Xolmatov",
+    "Aliyeva", "Qodirov", "Tursunova", "Ergashev", "Rahimova",
+    "Usmonov", "Yusupova", "Olimov", "Hamidova", "Nazarov",
+    "Sobirova", "Murodov", "Tohirova", "Salimov", "Oripova",
+  ];
+
+  const templates = Array.from({ length: 20 }, (_, index) => {
+    const isActive = index < 10;
+    const owesMoney = index % 2 === 0;
+    const checkInOffset = isActive ? -(index + 1) : -(index + 12);
+    const stayDays = (index % 4) + 1;
+
+    return {
+      firstname: firstnames[index],
+      lastname: lastnames[index],
+      passport: `${DEMO_PASSPORT_PREFIX}${String(index + 1).padStart(3, "0")}`,
+      guestType: index % 3 === 0 ? "chetellik" : "uzb",
+      phone: `+99890${String(1234000 + index + 1).padStart(7, "0")}`,
+      birthDate: makeBirthDate(1985 + (index % 15), (index % 12) + 1, (index % 27) + 1),
+      room: rooms[index % rooms.length],
+      stayDays,
+      status: isActive ? "active" : "checked_out",
+      checkInAt: makeDate(checkInOffset, 9 + (index % 5), 10),
+      checkOutAt: isActive ? null : makeDate(checkInOffset + stayDays, 14, 0),
+      paidPart: owesMoney ? 0.45 : 1,
+      services: [{ service: demoServices[index % demoServices.length], qty: (index % 2) + 1 }],
+      vip: index % 4 === 0,
+      note: isActive ? "Demo faol mehmon" : "Demo chiqib ketgan mehmon",
+    };
+  });
 
   const docs = templates.map((t, idx) => {
     const dailyRate = getDailyRate(t.room, t.guestType);
     const billing = buildBilling(t.checkInAt, t.stayDays, dailyRate, settings, now);
     const baseTotal = Number(billing.totalAmount || 0);
-    const paidAmount =
-      t.status === "booked" ? 0 : Math.floor(baseTotal * Number(t.paidPart || 0));
 
     const guestServices = (t.services || []).map((item) => ({
       serviceId: item.service?._id,
@@ -223,7 +253,32 @@ const seedGuests = async (rooms, settings, demoServices) => {
     }));
     const servicesTotal = guestServices.reduce((sum, s) => sum + Number(s.totalAmount || 0), 0);
     const totalAmount = baseTotal + servicesTotal;
-    const debtAmount = t.status === "booked" ? 0 : Math.max(totalAmount - paidAmount, 0);
+    const paidAmount = Math.floor(totalAmount * Number(t.paidPart || 0));
+    const debtAmount = Math.max(totalAmount - paidAmount, 0);
+    const paymentTypes = ["naqd", "karta", "click", "bank"];
+    const firstPayment = Math.floor(paidAmount * 0.6);
+    const secondPayment = paidAmount - firstPayment;
+    const payments =
+      paidAmount > 0
+        ? [
+            {
+              amount: firstPayment,
+              type: paymentTypes[idx % paymentTypes.length],
+              note: "Demo to'lov - avans",
+              createdAt: makeCurrentMonthDate(idx, 9 + (idx % 8), 10),
+            },
+            ...(secondPayment > 0
+              ? [
+                  {
+                    amount: secondPayment,
+                    type: paymentTypes[(idx + 1) % paymentTypes.length],
+                    note: "Demo to'lov - yakuniy",
+                    createdAt: makeCurrentMonthDate(idx, 15 + (idx % 5), 30),
+                  },
+                ]
+              : []),
+          ]
+        : [];
 
     return {
       firstname: t.firstname,
@@ -241,17 +296,7 @@ const seedGuests = async (rooms, settings, demoServices) => {
       totalAmount,
       paidAmount,
       debtAmount,
-      payments:
-        paidAmount > 0
-          ? [
-              {
-                amount: paidAmount,
-                type: idx % 2 === 0 ? "naqd" : "karta",
-                note: "Demo to'lov",
-                createdAt: makeDate(-Math.max(idx, 1), 18, 0),
-              },
-            ]
-          : [],
+      payments,
       services: guestServices,
       status: t.status,
       bookedForAt: t.status === "booked" ? t.checkInAt : null,
@@ -262,8 +307,9 @@ const seedGuests = async (rooms, settings, demoServices) => {
     };
   });
 
-  await Guest.insertMany(docs, { ordered: false });
+  const insertedGuests = await Guest.insertMany(docs, { ordered: false });
   await syncRoomsOccupancy(rooms.map((r) => r._id));
+  return insertedGuests;
 };
 
 const seedHallBookings = async () => {
@@ -274,56 +320,31 @@ const seedHallBookings = async () => {
     ],
   });
 
-  const docs = [
-    {
-      hallName: "Grand Hall",
-      eventName: `${HALL_EVENT_PREFIX}Nikoh marosimi`,
-      customerFirstname: "Umid",
-      customerLastname: "Aliyev",
-      phone: "+998901110001",
-      startDate: makeDate(2, 9),
-      endDate: makeDate(2, 22),
-      totalAmount: 12000000,
-      paidAmount: 3000000,
-      debtAmount: 9000000,
-      payments: [{ amount: 3000000, type: "bank", note: "Oldindan to'lov" }],
-      status: "active",
-      note: TEST_NOTE,
-      createdBy: { role: "seed", login: "demo-seed" },
-    },
-    {
-      hallName: "Classic Hall",
-      eventName: `${HALL_EVENT_PREFIX}Tug'ilgan kun`,
-      customerFirstname: "Nodira",
-      customerLastname: "Karimova",
-      phone: "+998901110002",
-      startDate: makeDate(-3, 10),
-      endDate: makeDate(-3, 20),
-      totalAmount: 6500000,
-      paidAmount: 6500000,
-      debtAmount: 0,
-      payments: [{ amount: 6500000, type: "naqd", note: "To'liq to'lov" }],
-      status: "active",
-      note: TEST_NOTE,
-      createdBy: { role: "seed", login: "demo-seed" },
-    },
-    {
-      hallName: "Business Hall",
-      eventName: `${HALL_EVENT_PREFIX}Seminar`,
-      customerFirstname: "Sardor",
-      customerLastname: "Qodirov",
-      phone: "+998901110003",
-      startDate: makeDate(5, 9),
-      endDate: makeDate(5, 18),
-      totalAmount: 5000000,
-      paidAmount: 1000000,
-      debtAmount: 4000000,
-      payments: [{ amount: 1000000, type: "click", note: "Qisman to'lov" }],
-      status: "active",
-      note: TEST_NOTE,
-      createdBy: { role: "seed", login: "demo-seed" },
-    },
+  const events = [
+    "Nikoh marosimi", "Tug'ilgan kun", "Seminar", "Konferensiya", "Banket",
+    "Trening", "Yubiley", "Taqdimot", "Uchrashuv", "Bitiruv kechasi",
   ];
+  const hallNames = ["Grand Hall", "Classic Hall", "Business Hall"];
+  const docs = events.map((eventName, index) => {
+    const totalAmount = 5000000 + index * 750000;
+    const paidAmount = index % 3 === 0 ? totalAmount : Math.floor(totalAmount * 0.4);
+    return {
+      hallName: hallNames[index % hallNames.length],
+      eventName: `${HALL_EVENT_PREFIX}${eventName}`,
+      customerFirstname: `Mijoz ${index + 1}`,
+      customerLastname: "Demo",
+      phone: `+99890111${String(index + 1).padStart(4, "0")}`,
+      startDate: makeDate(index - 3, 9),
+      endDate: makeDate(index - 3, 19),
+      totalAmount,
+      paidAmount,
+      debtAmount: totalAmount - paidAmount,
+      payments: [{ amount: paidAmount, type: ["bank", "naqd", "click", "karta"][index % 4], note: "Demo to'lov" }],
+      status: index === 8 ? "canceled" : "active",
+      note: TEST_NOTE,
+      createdBy: { role: "seed", login: "demo-seed" },
+    };
+  });
 
   await HallBooking.insertMany(docs, { ordered: false });
 };
@@ -337,12 +358,17 @@ const seedExpenses = async () => {
     ["Tozalash vositalari", "Xo'jalik", 340000, "karta"],
     ["Internet", "Aloqa", 270000, "click"],
     ["Texnik xizmat", "Ta'mirlash", 680000, "bank"],
+    ["Suv ta'minoti", "Kommunal", 410000, "bank"],
+    ["Reklama", "Marketing", 850000, "karta"],
+    ["Kantselyariya", "Xo'jalik", 195000, "naqd"],
+    ["Transport", "Logistika", 520000, "click"],
+    ["Maishiy texnika", "Jihozlar", 2300000, "bank"],
   ].map(([title, category, amount, paymentType], index) => ({
     title: `${EXPENSE_PREFIX}${title}`,
     category,
     amount,
     paymentType,
-    spentAt: makeDate(-index - 1, 10 + index, 15),
+    spentAt: makeCurrentMonthDate(index, 10 + index, 15),
     note: TEST_NOTE,
     createdBy: { role: "seed", login: "demo-seed" },
   }));
@@ -355,22 +381,21 @@ const main = async () => {
 
   await mongoose.connect(process.env.MONGO_URI);
   const settings = await getHotelSettings();
-  const rooms = await Room.find({ status: { $ne: "remont" } }).sort({ roomNumber: 1 }).lean();
-
-  if (!rooms.length) throw new Error("Demo seed uchun xona topilmadi");
-
+  await ensureDemoEmployees();
+  const rooms = await ensureDemoRooms();
   const demoServices = await ensureDemoServices();
   await seedGuests(rooms, settings, demoServices);
   await seedHallBookings();
   await seedExpenses();
 
-  const [guestCount, debtorsCount, activeCount, bookedCount, checkedOutCount, serviceCount, expenseCount, hallCount] =
+  const [employeeCount, roomCount, guestCount, debtorsCount, activeCount, checkedOutCount, serviceCount, expenseCount, hallCount] =
     await Promise.all([
-      Guest.countDocuments({}),
-      Guest.countDocuments({ debtAmount: { $gt: 0 } }),
-      Guest.countDocuments({ status: "active" }),
-      Guest.countDocuments({ status: "booked" }),
-      Guest.countDocuments({ status: "checked_out" }),
+      Employee.countDocuments({ firstname: { $regex: `^${DEMO_EMPLOYEE_PREFIX}` } }),
+      Room.countDocuments({ roomNumber: { $regex: `^${DEMO_ROOM_PREFIX}` } }),
+      Guest.countDocuments({ passport: { $regex: `^${DEMO_PASSPORT_PREFIX}` } }),
+      Guest.countDocuments({ passport: { $regex: `^${DEMO_PASSPORT_PREFIX}` }, debtAmount: { $gt: 0 } }),
+      Guest.countDocuments({ passport: { $regex: `^${DEMO_PASSPORT_PREFIX}` }, status: "active" }),
+      Guest.countDocuments({ passport: { $regex: `^${DEMO_PASSPORT_PREFIX}` }, status: "checked_out" }),
       Service.countDocuments({ name: { $regex: `^${SERVICE_PREFIX}` } }),
       Expense.countDocuments({ title: { $regex: `^${EXPENSE_PREFIX}` } }),
       HallBooking.countDocuments({ eventName: { $regex: `^${HALL_EVENT_PREFIX}` } }),
@@ -380,7 +405,9 @@ const main = async () => {
     JSON.stringify(
       {
         message: "Demo ma'lumotlar tayyorlandi",
-        guests: { total: guestCount, active: activeCount, booked: bookedCount, checked_out: checkedOutCount, debtors: debtorsCount },
+        employees: employeeCount,
+        rooms: roomCount,
+        guests: { total: guestCount, active: activeCount, checked_out: checkedOutCount, debtors: debtorsCount },
         services: serviceCount,
         expenses: expenseCount,
         hallBookings: hallCount,
@@ -399,4 +426,3 @@ main()
   .finally(async () => {
     await mongoose.disconnect();
   });
-
