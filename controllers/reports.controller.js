@@ -7,9 +7,23 @@ const Service = require("../model/Service");
 const VipRequest = require("../model/VipRequest");
 const HallBooking = require("../model/HallBooking");
 const response = require("../utils/response");
+const { getDailyRateForDay, getLodgingTotal } = require("../utils/guestDailyRates");
+const { getRoomAt } = require("../utils/guestRoomStays");
 
 const TIMEZONE = process.env.APP_TIMEZONE || "Asia/Tashkent";
 const MONTH_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
+const DATE_PATTERN = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+
+const escapeRegex = (value) =>
+  String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const getReportDay = (dateQuery) => {
+  const value = String(dateQuery || "");
+  if (!DATE_PATTERN.test(value)) return null;
+
+  const day = moment.tz(value, "YYYY-MM-DD", true, TIMEZONE);
+  return day.isValid() && day.format("YYYY-MM-DD") === value ? day : null;
+};
 
 const getMonthBase = (monthQuery) => {
   if (MONTH_PATTERN.test(String(monthQuery || ""))) {
@@ -17,6 +31,119 @@ const getMonthBase = (monthQuery) => {
   }
   return moment.tz(TIMEZONE).startOf("month");
 };
+
+const getReportRange = ({ from, to, month }) => {
+  if (from || to) {
+    if (!DATE_PATTERN.test(String(from || "")) || !DATE_PATTERN.test(String(to || ""))) {
+      return null;
+    }
+
+    const start = moment.tz(from, "YYYY-MM-DD", true, TIMEZONE).startOf("day");
+    const end = moment.tz(to, "YYYY-MM-DD", true, TIMEZONE).endOf("day");
+    if (!start.isValid() || !end.isValid() || end.isBefore(start)) return null;
+    return { start, end, label: `${start.format("YYYY-MM-DD")} - ${end.format("YYYY-MM-DD")}` };
+  }
+
+  const base = getMonthBase(month);
+  return {
+    start: base.clone().startOf("month"),
+    end: base.clone().endOf("month"),
+    label: base.format("YYYY-MM"),
+  };
+};
+
+const normalizePaymentType = (type) => {
+  const value = String(type || "").toLowerCase().trim();
+  if (value === "cash") return "naqd";
+  if (["transfer", "bank"].includes(value)) return "bank";
+  return value;
+};
+
+const compareRoomRows = (a, b) => {
+  const korpusA = String(a?.korpus || "").trim();
+  const korpusB = String(b?.korpus || "").trim();
+  const korpusCompare = korpusA.localeCompare(korpusB, "uz", {
+    numeric: true,
+    sensitivity: "base",
+  });
+  if (korpusCompare !== 0) return korpusCompare;
+
+  const roomA = String(a?.roomNumber || "").trim();
+  const roomB = String(b?.roomNumber || "").trim();
+  const roomNumericA = Number(roomA);
+  const roomNumericB = Number(roomB);
+  const roomAIsNumeric = Number.isFinite(roomNumericA) && roomA !== "";
+  const roomBIsNumeric = Number.isFinite(roomNumericB) && roomB !== "";
+  if (roomAIsNumeric && roomBIsNumeric && roomNumericA !== roomNumericB) {
+    return roomNumericA - roomNumericB;
+  }
+
+  return roomA.localeCompare(roomB, "uz", {
+    numeric: true,
+    sensitivity: "base",
+  });
+};
+
+const splitBalance = (balance) => ({
+  prepayment: Math.max(0, balance),
+  debt: Math.max(0, -balance),
+});
+
+const getOperationalDay = (date) => {
+  const localDate = moment(date).tz(TIMEZONE);
+  if (localDate.hour() < 12) localDate.subtract(1, "day");
+  return localDate.startOf("day");
+};
+
+const calculateDailyGuestBalance = ({ guest, reportDay, dayStart, nextDayStart }) => {
+  const checkInOperationalDay = getOperationalDay(guest.checkInAt || dayStart);
+  const previousBillableDays = Math.max(
+    0,
+    reportDay.clone().startOf("day").diff(checkInOperationalDay, "day"),
+  );
+  const payments = (guest.payments || []).reduce(
+    (totals, payment) => {
+      const createdAt = new Date(payment.createdAt);
+      const amount = Number(payment.amount || 0);
+      if (Number.isNaN(createdAt.getTime()) || createdAt >= nextDayStart) return totals;
+
+      if (createdAt < dayStart) {
+        totals.beforeDay += amount;
+        return totals;
+      }
+
+      const type = String(payment.type || "").toLowerCase();
+      if (type === "naqd" || type === "cash") totals.cash += amount;
+      else if (type === "karta" || type === "card" || type === "click") totals.card += amount;
+      else if (type === "bank" || type === "transfer") totals.transfer += amount;
+      return totals;
+    },
+    { beforeDay: 0, cash: 0, card: 0, transfer: 0 },
+  );
+
+  const currentDayRate = getDailyRateForDay(
+    guest,
+    previousBillableDays + 1,
+  );
+  const previousLodgingAmount = previousBillableDays
+    ? getLodgingTotal(guest, previousBillableDays)
+    : 0;
+  const opening = splitBalance(payments.beforeDay - previousLodgingAmount);
+  const todayPayments = payments.cash + payments.card + payments.transfer;
+  const closing = splitBalance(
+    opening.prepayment - opening.debt + todayPayments - currentDayRate,
+  );
+
+  return { opening, closing, payments };
+};
+
+const getDailyActiveGuestFilter = ({ snapshotAt }) => ({
+  checkInAt: { $lte: snapshotAt },
+  $or: [
+    { status: "active" },
+    { status: "checked_out", checkOutAt: { $gt: snapshotAt } },
+  ],
+});
 
 const getReportsSummary = async (req, res) => {
   try {
@@ -385,6 +512,455 @@ const getReportsSummary = async (req, res) => {
   }
 };
 
+const getClientSalesReport = async (req, res) => {
+  try {
+    const range = getReportRange({
+      from: req.query.from,
+      to: req.query.to,
+      month: req.query.month,
+    });
+    if (!range) {
+      return response.error(res, "Sana oralig'i noto'g'ri kiritilgan");
+    }
+
+    const requestedType = normalizePaymentType(req.query.type);
+    const search = String(req.query.query || "").trim();
+    const requestedClientType = String(req.query.clientType || "").toLowerCase().trim();
+    const page = Math.max(Number(req.query.page || 1), 1);
+    const limit = Math.min(Math.max(Number(req.query.limit || 30), 1), 100);
+    const allowedTypes = new Set(["naqd", "bank", "karta", "click"]);
+    const allowedClientTypes = new Set(["guest", "organization", "group"]);
+    const typeFilter = allowedTypes.has(requestedType) ? requestedType : "";
+    const clientTypeFilter = allowedClientTypes.has(requestedClientType)
+      ? requestedClientType
+      : "";
+    const match = {
+      checkInAt: {
+        $gte: range.start.toDate(),
+        $lte: range.end.toDate(),
+      },
+    };
+    if (typeFilter) match.mainPaymentType = typeFilter;
+    if (search) {
+      const searchRegex = { $regex: escapeRegex(search), $options: "i" };
+      match.$or = [
+        { firstname: searchRegex },
+        { lastname: searchRegex },
+        {
+          $expr: {
+            $regexMatch: {
+              input: {
+                $trim: {
+                  input: {
+                    $concat: [
+                      { $ifNull: ["$firstname", ""] },
+                      " ",
+                      { $ifNull: ["$lastname", ""] },
+                    ],
+                  },
+                },
+              },
+              regex: escapeRegex(search),
+              options: "i",
+            },
+          },
+        },
+        { organization: searchRegex },
+        { passport: searchRegex },
+        { phone: searchRegex },
+      ];
+    }
+
+    const salesRows = await Guest.aggregate([
+      { $match: match },
+      {
+        $lookup: {
+          from: "rooms",
+          localField: "room",
+          foreignField: "_id",
+          as: "roomDoc",
+        },
+      },
+      { $unwind: { path: "$roomDoc", preserveNullAndEmptyArrays: true } },
+      {
+        $lookup: {
+          from: "groupbookings",
+          localField: "group",
+          foreignField: "_id",
+          as: "groupDoc",
+        },
+      },
+      { $unwind: { path: "$groupDoc", preserveNullAndEmptyArrays: true } },
+      {
+        $addFields: {
+          clientType: {
+            $cond: [
+              { $ifNull: ["$group", false] },
+              "group",
+              {
+                $cond: [
+                  { $gt: [{ $strLenCP: { $ifNull: ["$organization", ""] } }, 0] },
+                  "organization",
+                  "guest",
+                ],
+              },
+            ],
+          },
+        },
+      },
+      ...(clientTypeFilter ? [{ $match: { clientType: clientTypeFilter } }] : []),
+      { $sort: { checkInAt: -1 } },
+      {
+        $project: {
+          _id: 0,
+          guestId: "$_id",
+          fullName: {
+            $trim: {
+              input: {
+                $concat: [
+                  { $ifNull: ["$firstname", ""] },
+                  " ",
+                  { $ifNull: ["$lastname", ""] },
+                ],
+              },
+            },
+          },
+          passport: { $ifNull: ["$passport", ""] },
+          organization: { $ifNull: ["$organization", ""] },
+          clientType: 1,
+          groupName: { $ifNull: ["$groupDoc.name", ""] },
+          roomNumber: { $ifNull: ["$roomDoc.roomNumber", "-"] },
+          korpus: { $ifNull: ["$roomDoc.korpus", ""] },
+          amount: { $ifNull: ["$totalAmount", 0] },
+          paidAmount: { $ifNull: ["$paidAmount", 0] },
+          debtAmount: { $ifNull: ["$debtAmount", 0] },
+          type: "$mainPaymentType",
+          note: { $ifNull: ["$note", ""] },
+          createdAt: "$createdAt",
+          checkInAt: "$checkInAt",
+          checkOutAt: "$checkOutAt",
+        },
+      },
+    ]);
+
+    const totals = salesRows.reduce(
+      (summary, row) => {
+        const type = normalizePaymentType(row.type);
+        const amount = Number(row.amount || 0);
+        const paidAmount = Number(row.paidAmount || 0);
+        const debtAmount = Number(row.debtAmount || 0);
+        summary.total += amount;
+        summary.paidAmount += paidAmount;
+        summary.debtAmount += debtAmount;
+        summary.count += 1;
+        if (Object.prototype.hasOwnProperty.call(summary.byType, type)) {
+          summary.byType[type].amount += amount;
+          summary.byType[type].paidAmount += paidAmount;
+          summary.byType[type].debtAmount += debtAmount;
+          summary.byType[type].count += 1;
+        }
+        return summary;
+      },
+      {
+        total: 0,
+        paidAmount: 0,
+        debtAmount: 0,
+        count: 0,
+        byType: {
+          naqd: { amount: 0, paidAmount: 0, debtAmount: 0, count: 0 },
+          bank: { amount: 0, paidAmount: 0, debtAmount: 0, count: 0 },
+          karta: { amount: 0, paidAmount: 0, debtAmount: 0, count: 0 },
+          click: { amount: 0, paidAmount: 0, debtAmount: 0, count: 0 },
+        },
+      },
+    );
+
+    return response.success(res, "Mijozlar savdo hisoboti", {
+      range: {
+        from: range.start.format("YYYY-MM-DD"),
+        to: range.end.format("YYYY-MM-DD"),
+        label: range.label,
+      },
+      type: typeFilter || "all",
+      clientType: clientTypeFilter || "all",
+      totals,
+      items: salesRows.slice((page - 1) * limit, page * limit).map((row) => ({
+        ...row,
+        amount: Number(row.amount || 0),
+        paidAmount: Number(row.paidAmount || 0),
+        debtAmount: Number(row.debtAmount || 0),
+      })),
+      pagination: {
+        page,
+        limit,
+        total: salesRows.length,
+        totalPages: Math.max(Math.ceil(salesRows.length / limit), 1),
+      },
+    });
+  } catch (error) {
+    return response.serverError(res, error.message);
+  }
+};
+
+const getDailyReport = async (req, res) => {
+  try {
+    const day = getReportDay(req.query.date);
+    const includeAllRooms = String(req.query.includeAllRooms || "") === "true";
+    const roomFilters = {};
+    const korpus = String(req.query.korpus || "").trim().toUpperCase();
+    const floor = Number(req.query.floor || 0);
+    if (includeAllRooms && korpus) roomFilters.korpus = korpus;
+    if (includeAllRooms && Number.isFinite(floor) && floor > 0) {
+      roomFilters.floor = floor;
+    }
+    if (!day) {
+      return response.error(res, "Sana YYYY-MM-DD formatida bo'lishi kerak");
+    }
+
+    const today = moment.tz(TIMEZONE).startOf("day");
+    if (day.isAfter(today, "day")) {
+      return response.error(res, "Kelajak sanasi uchun hisobot olib bo'lmaydi");
+    }
+
+    // Hotel daily reports follow the operational day: 12:00 to 12:00.
+    const dayStart = day.clone().hour(12).minute(0).second(0).millisecond(0).toDate();
+    const nextDayStart = day.clone().add(1, "day").hour(12).minute(0).second(0).millisecond(0).toDate();
+    const snapshotAt = new Date(Math.min(Date.now(), nextDayStart.getTime() - 1));
+
+    const [guestPaymentRows, hallPaymentRows, expenses, servicesAgg, activeGuests, rooms] =
+      await Promise.all([
+        Guest.aggregate([
+          { $unwind: "$payments" },
+          { $match: { "payments.createdAt": { $gte: dayStart, $lt: nextDayStart } } },
+          { $sort: { "payments.createdAt": 1 } },
+          { $project: {
+            _id: 0,
+            guestId: { $toString: "$_id" },
+            room: "$room",
+            roomStays: "$roomStays",
+            checkInAt: "$checkInAt",
+            firstname: "$firstname",
+            lastname: "$lastname",
+            amount: { $ifNull: ["$payments.amount", 0] },
+            type: "$payments.type",
+            createdAt: "$payments.createdAt",
+          } },
+        ]),
+        HallBooking.aggregate([
+          { $unwind: "$payments" },
+          { $match: { "payments.createdAt": { $gte: dayStart, $lt: nextDayStart } } },
+          { $sort: { "payments.createdAt": 1 } },
+          { $project: {
+            _id: 0,
+            amount: { $ifNull: ["$payments.amount", 0] },
+            type: "$payments.type",
+            createdAt: "$payments.createdAt",
+            source: { $concat: [{ $ifNull: ["$hallName", "Zal"] }, " - ", { $ifNull: ["$eventName", ""] }] },
+          } },
+        ]),
+        Expense.find({ spentAt: { $gte: dayStart, $lt: nextDayStart } })
+          .select("title category amount paymentType spentAt")
+          .sort({ spentAt: 1 })
+          .lean(),
+        Guest.aggregate([
+          { $unwind: "$services" },
+          { $match: { "services.usedAt": { $gte: dayStart, $lt: nextDayStart } } },
+          { $group: { _id: null, totalAmount: { $sum: { $ifNull: ["$services.totalAmount", 0] } } } },
+        ]).then((rows) => rows?.[0] || {}),
+        Guest.find(getDailyActiveGuestFilter({ snapshotAt }))
+          .populate("room", "roomNumber floor korpus capacity activeGuestsCount category prices status")
+          .populate("roomStays.room", "roomNumber floor korpus capacity category prices")
+          .select(
+            "firstname lastname organization room roomStays stayDays billableDays dailyRate dailyRates totalAmount paidAmount debtAmount payments status vip checkInAt checkOutAt checkoutDueAt",
+          )
+          .sort({ "room.roomNumber": 1, createdAt: 1 })
+          .lean(),
+        Room.find({ createdAt: { $lt: nextDayStart }, ...roomFilters })
+          .select("_id roomNumber floor korpus capacity category prices status")
+          .sort({ roomNumber: 1 })
+          .lean(),
+      ]);
+
+    const historicalRoomIds = [...new Set([...activeGuests, ...guestPaymentRows]
+      .flatMap((guest) => [guest.room, ...(guest.roomStays || []).map((stay) => stay.room)])
+      .map((room) => String(room?._id || room))
+      .filter((id) => /^[0-9a-fA-F]{24}$/.test(id)))];
+    const historicalRooms = historicalRoomIds.length
+      ? await Room.find({ _id: { $in: historicalRoomIds } })
+        .select("_id roomNumber floor korpus capacity category prices").lean()
+      : [];
+    const roomById = new Map([...rooms, ...historicalRooms]
+      .map((room) => [String(room._id), room]));
+
+    guestPaymentRows.forEach((row) => {
+      const roomAtPayment = getRoomAt(row, row.createdAt);
+      const paymentRoom = roomById.get(String(roomAtPayment?._id || roomAtPayment));
+      row.source = `Xona ${paymentRoom?.roomNumber || "-"} - ${row.firstname || ""} ${row.lastname || ""}`.trim();
+    });
+
+    const payments = [...guestPaymentRows, ...hallPaymentRows]
+      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    const paymentTotals = payments.reduce(
+      (totals, payment) => {
+        const amount = Number(payment.amount || 0);
+        totals.total += amount;
+        totals[payment.type] = Number(totals[payment.type] || 0) + amount;
+        return totals;
+      },
+      { total: 0, naqd: 0, karta: 0, click: 0, bank: 0 },
+    );
+    const expenseTotal = expenses.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+    const activeGuestRows = activeGuests.map((guest) => {
+      const roomAtDate = getRoomAt(guest, snapshotAt);
+      const roomDoc = roomById.get(String(roomAtDate?._id || roomAtDate)) || roomAtDate || {};
+      const fullName = `${guest.firstname || ""} ${guest.lastname || ""}`.trim();
+      const baseDailyRate = Number(guest.dailyRate || roomDoc.prices?.oddiy || 0);
+      const checkInOperationalDay = getOperationalDay(guest.checkInAt || dayStart);
+      const dayNumber = Math.max(
+        1,
+        day.clone().startOf("day").diff(checkInOperationalDay, "day") + 1,
+      );
+      const dailyRate = guest.vip
+        ? 0
+        : getDailyRateForDay({ ...guest, dailyRate: baseDailyRate }, dayNumber);
+      const balance = calculateDailyGuestBalance({
+        guest,
+        reportDay: day,
+        dayStart,
+        nextDayStart,
+      });
+      return {
+        roomId: roomDoc._id,
+        roomNumber: roomDoc.roomNumber || "-",
+        floor: roomDoc.floor || "-",
+        korpus: roomDoc.korpus || "-",
+        organization: String(guest.organization || "").trim(),
+        guestCount: 1,
+        dailyRate,
+        breakfast: 0,
+        openingPrepayment: balance.opening.prepayment,
+        openingDebt: balance.opening.debt,
+        cash: balance.payments.cash,
+        card: balance.payments.card,
+        transfer: balance.payments.transfer,
+        fullName,
+        closingPrepayment: balance.closing.prepayment,
+        closingDebt: balance.closing.debt,
+      };
+    });
+    const occupiedGuestRows = Array.from(
+      activeGuestRows.reduce((rooms, guest) => {
+        const key = String(guest.roomId || guest.roomNumber || "");
+        const current = rooms.get(key);
+        if (!current) {
+          rooms.set(key, { ...guest, fullName: [guest.fullName] });
+          return rooms;
+        }
+        current.fullName.push(guest.fullName);
+        current.guestCount += guest.guestCount;
+        current.openingPrepayment += guest.openingPrepayment;
+        current.openingDebt += guest.openingDebt;
+        current.cash += guest.cash;
+        current.card += guest.card;
+        current.transfer += guest.transfer;
+        current.closingPrepayment += guest.closingPrepayment;
+        current.closingDebt += guest.closingDebt;
+        current.dailyRate += guest.dailyRate;
+        current.organization = current.organization || guest.organization;
+        return rooms;
+      }, new Map()).values(),
+    ).map((guest) => ({
+      ...guest,
+      fullName: guest.fullName.filter(Boolean).join("\n"),
+    })).sort(compareRoomRows);
+    const filteredOccupiedGuestRows = includeAllRooms
+      ? occupiedGuestRows.filter((guest) => {
+          const matchesKorpus = !roomFilters.korpus || guest.korpus === roomFilters.korpus;
+          const matchesFloor = !roomFilters.floor || Number(guest.floor) === Number(roomFilters.floor);
+          return matchesKorpus && matchesFloor;
+        })
+      : occupiedGuestRows;
+    const groupedGuestRows = includeAllRooms
+      ? [
+          ...filteredOccupiedGuestRows,
+          ...rooms
+            .filter(
+              (room) =>
+                !filteredOccupiedGuestRows.some(
+                  (guest) => String(guest.roomId || "") === String(room._id || ""),
+                ),
+            )
+            .map((room) => ({
+              roomId: room._id,
+              roomNumber: room.roomNumber || "-",
+              floor: room.floor || "-",
+              korpus: room.korpus || "-",
+              organization: "",
+              guestCount: 0,
+              dailyRate: 0,
+              breakfast: 0,
+              openingPrepayment: 0,
+              openingDebt: 0,
+              cash: 0,
+              card: 0,
+              transfer: 0,
+              fullName: "",
+              closingPrepayment: 0,
+              closingDebt: 0,
+            })),
+        ].sort(compareRoomRows)
+      : filteredOccupiedGuestRows;
+    const occupiedRooms = filteredOccupiedGuestRows.length;
+    const arrivals = await Guest.countDocuments({ checkInAt: { $gte: dayStart, $lt: nextDayStart } });
+    const departures = await Guest.countDocuments({ checkOutAt: { $gte: dayStart, $lt: nextDayStart } });
+
+    return response.success(res, "Kunlik hisobot ma'lumotlari", {
+      date: day.format("YYYY-MM-DD"),
+      timezone: TIMEZONE,
+      generatedAt: new Date().toISOString(),
+      revenue: {
+        total: paymentTotals.total,
+        room: guestPaymentRows.reduce((sum, item) => sum + Number(item.amount || 0), 0),
+        services: Number(servicesAgg.totalAmount || 0),
+        hall: hallPaymentRows.reduce((sum, item) => sum + Number(item.amount || 0), 0),
+      },
+      expenses: {
+        total: expenseTotal,
+        items: expenses.map((item) => ({
+          title: item.title,
+          category: item.category,
+          amount: Number(item.amount || 0),
+          paymentType: item.paymentType,
+        })),
+      },
+      balance: paymentTotals.total - expenseTotal,
+      paymentTypes: {
+        cash: paymentTotals.naqd,
+        card: paymentTotals.karta + paymentTotals.click,
+        transfer: paymentTotals.bank,
+      },
+      operations: {
+        occupiedRooms,
+        availableRooms: Math.max(0, Number(rooms.length || 0) - occupiedRooms),
+        arrivals,
+        departures,
+        guests: activeGuests.length,
+      },
+      debt: {
+        debtors: groupedGuestRows.filter((row) => row.closingDebt > 0).length,
+        total: groupedGuestRows.reduce((sum, row) => sum + row.closingDebt, 0),
+      },
+      guests: groupedGuestRows,
+    });
+  } catch (error) {
+    return response.serverError(res, error.message);
+  }
+};
+
 module.exports = {
+  calculateDailyGuestBalance,
+  getClientSalesReport,
+  getDailyActiveGuestFilter,
+  getDailyReport,
   getReportsSummary,
 };

@@ -29,6 +29,7 @@ const createHallBookingSchema = {
     endDate: { type: "string", minLength: 1 },
     totalAmount: { type: "number", minimum: 0 },
     paidAmount: { type: "number", minimum: 0 },
+    initialPaymentDate: { type: "string", minLength: 1 },
     note: { type: "string" },
   },
 };
@@ -56,8 +57,9 @@ const addHallBookingPaymentSchema = {
   required: ["amount", "type"],
   properties: {
     amount: { type: "number", minimum: 1, multipleOf: 1 },
-    type: { type: "string", enum: ["naqd", "click", "bank", "karta"] },
+    type: { type: "string", enum: ["naqd", "bank", "karta"] },
     note: { type: "string" },
+    paymentDate: { type: "string", minLength: 1 },
   },
 };
 

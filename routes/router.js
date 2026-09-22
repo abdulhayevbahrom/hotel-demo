@@ -1,4 +1,6 @@
 const router = require("express").Router();
+const staffPayroll = require("../controllers/staffPayroll.controller");
+const response = require("../utils/response");
 const validate = require("../middleware/validate.middleware");
 const {
   createEmployeeSchema,
@@ -16,8 +18,15 @@ const {
   createExpenseSchema,
   updateExpenseSchema,
   expenseIdParamsSchema,
+  deleteExpensesBulkSchema,
 } = require("../validations/expense.validation");
 const { updateSettingsSchema } = require("../validations/setting.validation");
+const {
+  createGroupBookingSchema,
+  updateGroupBookingSchema,
+  groupBookingIdParamsSchema,
+  addGroupPaymentSchema,
+} = require("../validations/groupBooking.validation");
 const {
   createEmployee,
   getEmployees,
@@ -25,6 +34,7 @@ const {
   updateEmployee,
   deleteEmployee,
   loginEmployee,
+  logoutEmployee,
   refreshEmployeeToken,
 } = require("../controllers/employee.controller");
 const {
@@ -35,25 +45,47 @@ const {
   deleteRoom,
 } = require("../controllers/room.controller");
 const {
+  uploadRoomImages,
+  parseRoomMultipartBody,
+} = require("../middleware/roomImageUpload.middleware");
+const {
+  requireSectionAccess,
+} = require("../middleware/sectionAccess.middleware");
+const {
   createExpense,
   getExpenses,
   updateExpense,
   deleteExpense,
+  deleteExpensesBulk,
 } = require("../controllers/expense.controller");
 const { getDashboardSummary } = require("../controllers/dashboard.controller");
-const { getReportsSummary } = require("../controllers/reports.controller");
+const {
+  getClientSalesReport,
+  getDailyReport,
+  getReportsSummary,
+} = require("../controllers/reports.controller");
 const {
   getSettings,
   updateSettings,
+  updateRoomCategoryImages,
 } = require("../controllers/setting.controller");
+const { getAuditLogs } = require("../controllers/auditLog.controller");
 const { sendSupportMessage } = require("../controllers/support.controller");
+const {
+  getStatus: getBookingStatus,
+  syncNow: syncBookingNow,
+} = require("../controllers/booking.controller");
 const {
   createGuestSchema,
   createGuestsBulkSchema,
   updateGuestSchema,
   guestIdParamsSchema,
   guestPassportParamsSchema,
+  guestPaymentParamsSchema,
+  bulkCheckoutGuestsSchema,
+  continueGuestStaySchema,
   addPaymentSchema,
+  updatePaymentSchema,
   addGuestServiceSchema,
   vipRequestIdParamsSchema,
   decideVipRequestSchema,
@@ -63,6 +95,11 @@ const {
   updateServiceSchema,
   serviceIdParamsSchema,
 } = require("../validations/service.validation");
+const {
+  createReceiptSchema,
+  updateReceiptSchema,
+  receiptIdParamsSchema,
+} = require("../validations/receipt.validation");
 const {
   hallBookingIdParamsSchema,
   createHallBookingSchema,
@@ -83,9 +120,15 @@ const {
   getVipRequestsCount,
   decideVipRequest,
   updateGuest,
+  activateBookedGuest,
+  resolveWebsiteBookingRooms,
+  cancelBookedGuest,
   addGuestPayment,
+  updateGuestPayment,
   addGuestService,
   checkoutGuest,
+  continueGuestStay,
+  checkoutGuestsBulk,
   deleteGuest,
 } = require("../controllers/guest.controller");
 const {
@@ -95,6 +138,12 @@ const {
   deleteService,
 } = require("../controllers/service.controller");
 const {
+  createReceipt,
+  getReceipts,
+  updateReceipt,
+  deleteReceipt,
+} = require("../controllers/receipt.controller");
+const {
   createHallBooking,
   getHallBookings,
   updateHallBooking,
@@ -102,6 +151,13 @@ const {
   cancelHallBooking,
   deleteHallBooking,
 } = require("../controllers/hallBooking.controller");
+const {
+  createGroupBooking,
+  getGroupBookings,
+  updateGroupBooking,
+  deleteGroupBooking,
+  addGroupPayment,
+} = require("../controllers/groupBooking.controller");
 
 router.post("/employee/login", validate(loginEmployeeSchema), loginEmployee);
 router.post(
@@ -109,30 +165,68 @@ router.post(
   validate(refreshTokenSchema),
   refreshEmployeeToken,
 );
-router.post("/employee", validate(createEmployeeSchema), createEmployee);
-router.get("/employees", getEmployees);
+router.post("/employee/logout", logoutEmployee);
+router.use((req, res, next) => {
+  if (req.method === "DELETE" && req.admin?.role !== "owner") {
+    return response.forbidden(res, "O'chirish huquqi faqat ownerga berilgan");
+  }
+  next();
+});
+router.post(
+  "/employee",
+  requireSectionAccess("employees"),
+  validate(createEmployeeSchema),
+  createEmployee,
+);
+router.get("/employees", requireSectionAccess("employees"), getEmployees);
 router.get(
   "/employee/:id",
+  requireSectionAccess("employees"),
   validate(employeeIdParamsSchema, "params"),
   getEmployeeById,
 );
 router.put(
   "/employee/:id",
+  requireSectionAccess("employees"),
   validate(employeeIdParamsSchema, "params"),
   validate(updateEmployeeSchema),
   updateEmployee,
 );
 router.delete(
   "/employee/:id",
+  requireSectionAccess("employees"),
   validate(employeeIdParamsSchema, "params"),
   deleteEmployee,
 );
-router.post("/room", validate(createRoomSchema), createRoom);
+router.get("/staff-attendance", requireSectionAccess("attendance"), staffPayroll.listAttendance);
+router.get("/staff-people", requireSectionAccess("attendance"), getEmployees);
+router.post("/staff-attendance", requireSectionAccess("attendance"), staffPayroll.saveAttendance);
+router.put("/staff-attendance/:id", requireSectionAccess("attendance"), staffPayroll.updateAttendance);
+router.delete("/staff-attendance/:id", requireSectionAccess("attendance"), staffPayroll.deleteAttendance);
+router.get("/staff-payroll/people", requireSectionAccess("payroll"), getEmployees);
+router.get("/staff-payroll", requireSectionAccess("payroll"), staffPayroll.report);
+router.get("/staff-payroll/history", requireSectionAccess("payroll"), staffPayroll.history);
+router.get("/staff-payroll/entries", requireSectionAccess("payroll"), staffPayroll.listEntries);
+router.get("/staff-payroll/entry-history", requireSectionAccess("payroll"), staffPayroll.employeeEntryHistory);
+router.get("/staff-payroll/payment-history", requireSectionAccess("payroll"), staffPayroll.paymentHistory);
+router.get("/staff-payroll/outstanding-months", requireSectionAccess("payroll"), staffPayroll.outstandingMonths);
+router.post("/staff-payroll/entries", requireSectionAccess("payroll"), staffPayroll.saveEntry);
+router.put("/staff-payroll/entries/:id", requireSectionAccess("payroll"), staffPayroll.updateEntry);
+router.delete("/staff-payroll/entries/:id", requireSectionAccess("payroll"), staffPayroll.deleteEntry);
+router.post(
+  "/group-booking/:id/payment",
+  validate(groupBookingIdParamsSchema, "params"),
+  validate(addGroupPaymentSchema),
+  addGroupPayment,
+);
+router.post("/room", uploadRoomImages, parseRoomMultipartBody, validate(createRoomSchema), createRoom);
 router.get("/rooms", getRooms);
 router.get("/room/:id", validate(roomIdParamsSchema, "params"), getRoomById);
 router.put(
   "/room/:id",
   validate(roomIdParamsSchema, "params"),
+  uploadRoomImages,
+  parseRoomMultipartBody,
   validate(updateRoomSchema),
   updateRoom,
 );
@@ -140,7 +234,14 @@ router.delete("/room/:id", validate(roomIdParamsSchema, "params"), deleteRoom);
 router.post("/expense", validate(createExpenseSchema), createExpense);
 router.get("/dashboard", getDashboardSummary);
 router.get("/reports-summary", getReportsSummary);
+router.get("/reports-client-sales", getClientSalesReport);
+router.get("/reports-daily", getDailyReport);
 router.get("/expenses", getExpenses);
+router.delete(
+  "/expenses/bulk",
+  validate(deleteExpensesBulkSchema),
+  deleteExpensesBulk,
+);
 router.put(
   "/expense/:id",
   validate(expenseIdParamsSchema, "params"),
@@ -154,8 +255,23 @@ router.delete(
 );
 router.get("/settings", getSettings);
 router.put("/settings", validate(updateSettingsSchema), updateSettings);
+router.put("/settings/room-category-images", uploadRoomImages, updateRoomCategoryImages);
+router.get("/audit-logs", requireSectionAccess("audit-logs"), getAuditLogs);
 router.post("/service", validate(createServiceSchema), createService);
 router.get("/services", getServices);
+router.post("/receipt", validate(createReceiptSchema), createReceipt);
+router.get("/receipts", getReceipts);
+router.put(
+  "/receipt/:id",
+  validate(receiptIdParamsSchema, "params"),
+  validate(updateReceiptSchema),
+  updateReceipt,
+);
+router.delete(
+  "/receipt/:id",
+  validate(receiptIdParamsSchema, "params"),
+  deleteReceipt,
+);
 router.put(
   "/service/:id",
   validate(serviceIdParamsSchema, "params"),
@@ -196,9 +312,28 @@ router.delete(
   deleteHallBooking,
 );
 router.post("/guest", validate(createGuestSchema), createGuest);
+router.post(
+  "/group-booking",
+  validate(createGroupBookingSchema),
+  createGroupBooking,
+);
+router.get("/group-bookings", getGroupBookings);
+router.put(
+  "/group-booking/:id",
+  validate(groupBookingIdParamsSchema, "params"),
+  validate(updateGroupBookingSchema),
+  updateGroupBooking,
+);
+router.delete(
+  "/group-booking/:id",
+  validate(groupBookingIdParamsSchema, "params"),
+  deleteGroupBooking,
+);
 router.post("/guests/bulk", validate(createGuestsBulkSchema), createGuestsBulk);
 router.get("/guests", getGuests);
 router.get("/occupancy", getOccupancy);
+router.get("/booking/status", getBookingStatus);
+router.post("/booking/sync", syncBookingNow);
 router.get("/vip-requests/count", getVipRequestsCount);
 router.get("/vip-requests", getVipRequests);
 router.post(
@@ -225,6 +360,12 @@ router.post(
   validate(addPaymentSchema),
   addGuestPayment,
 );
+router.put(
+  "/guest/:id/payment/:paymentIndex",
+  validate(guestPaymentParamsSchema, "params"),
+  validate(updatePaymentSchema),
+  updateGuestPayment,
+);
 router.post(
   "/guest/:id/service",
   validate(guestIdParamsSchema, "params"),
@@ -235,6 +376,28 @@ router.post(
   "/guest/:id/checkout",
   validate(guestIdParamsSchema, "params"),
   checkoutGuest,
+);
+router.post(
+  "/guest/:id/activate-booking",
+  validate(guestIdParamsSchema, "params"),
+  activateBookedGuest,
+);
+router.post("/website-booking/:reference/resolve", resolveWebsiteBookingRooms);
+router.post(
+  "/guest/:id/cancel-booking",
+  validate(guestIdParamsSchema, "params"),
+  cancelBookedGuest,
+);
+router.post(
+  "/guest/:id/continue",
+  validate(guestIdParamsSchema, "params"),
+  validate(continueGuestStaySchema),
+  continueGuestStay,
+);
+router.post(
+  "/guests/checkout-bulk",
+  validate(bulkCheckoutGuestsSchema),
+  checkoutGuestsBulk,
 );
 router.delete("/guest/:id", validate(guestIdParamsSchema, "params"), deleteGuest);
 router.post(

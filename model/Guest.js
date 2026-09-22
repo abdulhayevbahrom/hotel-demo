@@ -6,7 +6,7 @@ const paymentSchema = new mongoose.Schema(
     amount: { type: Number, required: true, min: 0 },
     type: {
       type: String,
-      enum: ["naqd", "click", "bank", "karta"],
+      enum: ["naqd", "bank", "karta"],
       required: true,
     },
     note: { type: String, trim: true, default: "" },
@@ -54,8 +54,17 @@ const guestSchema = new mongoose.Schema(
     firstname: { type: String, required: true, trim: true },
     lastname: { type: String, required: true, trim: true },
     passport: { type: String, trim: true, default: "" },
-    birthDate: { type: Date, required: true },
+    birthDate: { type: Date, default: null },
     phone: { type: String, trim: true, default: "" },
+    email: { type: String, trim: true, default: "" },
+    bookingReference: { type: String, trim: true, default: "", index: true },
+    bookingPublicTokenHash: { type: String, trim: true, default: "", index: true },
+    organization: { type: String, trim: true, default: "" },
+    group: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "GroupBooking",
+      default: null,
+    },
     guestType: { type: String, enum: ["uzb", "chetellik"], default: "uzb" },
     isBlacklisted: { type: Boolean, default: false },
 
@@ -72,6 +81,15 @@ const guestSchema = new mongoose.Schema(
 
     // Yashash ma'lumotlari
     room: { type: mongoose.Schema.Types.ObjectId, ref: "Room", required: true },
+    roomStays: {
+      type: [{
+        room: { type: mongoose.Schema.Types.ObjectId, ref: "Room", required: true },
+        from: { type: Date, required: true },
+        to: { type: Date, default: null },
+        _id: false,
+      }],
+      default: [],
+    },
     stayDays: { type: Number, required: true, min: 1, default: 1 }, // Kunlar
     billableDays: { type: Number, required: true, min: 1, default: 1 }, // Narxlanadigan kunlar
     checkoutReminderAt: { type: Date, default: null }, // Checkoutni qoldirish vaqt
@@ -79,6 +97,15 @@ const guestSchema = new mongoose.Schema(
 
     // Narx va qarzdorlik
     dailyRate: { type: Number, required: true, min: 0 },
+    dailyRates: {
+      type: [{ day: { type: Number, required: true, min: 1 }, amount: { type: Number, required: true, min: 0 }, _id: false }],
+      default: [],
+    },
+    mainPaymentType: {
+      type: String,
+      enum: ["naqd", "bank"],
+      default: "naqd",
+    },
     totalAmount: { type: Number, required: true, min: 0 },
     paidAmount: { type: Number, default: 0, min: 0 },
     debtAmount: { type: Number, default: 0, min: 0 },
@@ -88,7 +115,7 @@ const guestSchema = new mongoose.Schema(
     // Holat va kim bajargani
     status: {
       type: String,
-      enum: ["booked", "active", "checked_out"],
+      enum: ["booked", "active", "checked_out", "cancelled"],
       default: "active",
     },
     bookedForAt: { type: Date, default: null },
@@ -96,6 +123,25 @@ const guestSchema = new mongoose.Schema(
     checkoutBy: { type: actionBySchema, default: null },
     checkInAt: { type: Date, default: Date.now },
     checkOutAt: { type: Date, default: null },
+
+    // Tashqi bron kanali ma'lumotlari. Karta rekvizitlari ataylab
+    // saqlanmaydi; faqat bronni takrorlamasdan yangilash uchun zarur IDlar.
+    source: {
+      type: String,
+      enum: ["manual", "booking_com", "website"],
+      default: "manual",
+    },
+    externalHotelId: { type: String, trim: true, default: "" },
+    externalReservationId: { type: String, trim: true, default: "" },
+    externalReservationUnitId: { type: String, trim: true, default: "" },
+    externalRoomTypeId: { type: String, trim: true, default: "" },
+    externalReservationStatus: { type: String, trim: true, default: "" },
+    externalBookedAt: { type: Date, default: null },
+    externalModifiedAt: { type: Date, default: null },
+    externalCurrency: { type: String, trim: true, uppercase: true, default: "" },
+    externalTotalAmount: { type: Number, min: 0, default: 0 },
+    blocksWholeRoom: { type: Boolean, default: false },
+    cancelledAt: { type: Date, default: null },
 
     // Qo'shimcha izoh
     note: { type: String, trim: true, default: "" },
@@ -109,9 +155,21 @@ guestSchema.index({ status: 1, bookedForAt: 1 });
 guestSchema.index({ status: 1, checkoutDueAt: 1, checkoutReminderAt: 1, createdAt: -1 });
 guestSchema.index({ status: 1, debtAmount: 1, createdAt: -1 });
 guestSchema.index({ room: 1, status: 1, createdAt: -1 });
+guestSchema.index({ group: 1, status: 1, createdAt: -1 });
 guestSchema.index({ guestType: 1, vip: 1, status: 1, createdAt: -1 });
 guestSchema.index({ checkInAt: -1 });
 guestSchema.index({ "payments.createdAt": -1 });
 guestSchema.index({ checkOutAt: -1, status: 1 });
+guestSchema.index({ source: 1, externalReservationId: 1 });
+guestSchema.index(
+  { source: 1, externalReservationUnitId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      source: "booking_com",
+      externalReservationUnitId: { $type: "string" },
+    },
+  },
+);
 
 module.exports = mongoose.model("Guest", guestSchema);
