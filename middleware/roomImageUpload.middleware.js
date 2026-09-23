@@ -64,6 +64,9 @@ const uploadRoomImages = (req, res, next) => {
 
 const parseRoomMultipartBody = (req, res, next) => {
   try {
+    // JSON so'rovlarida body express tomonidan tayyorlanadi; noto'g'ri yoki
+    // tanasiz multipart so'rovda esa validatsiyaga doim obyekt uzatamiz.
+    req.body = req.body && typeof req.body === "object" ? req.body : {};
     if (typeof req.body.prices === "string") req.body.prices = JSON.parse(req.body.prices);
     return next();
   } catch (_) {
